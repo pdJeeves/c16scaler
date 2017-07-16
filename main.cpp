@@ -1,261 +1,120 @@
-#include <QCoreApplication>
-#include <QImage>
-#include <QImageWriter>
 #include <vector>
 #include <cstdio>
 #include <iostream>
 #include <cstring>
+#include "directoryrange.h"
+#include "spritefile.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <string.h>
 
-struct image_header
+#define UNUSED(x) (void)x
+
+bool isValidDirectory(const std::string & string)
 {
-	uint16_t width;
-	uint16_t height;
-	std::vector<uint32_t> offset;
-};
+	if(string.empty())
+		return false;
 
-QImage readC16frame(FILE * file, bool is555)
-{
-	uint16_t color;
-	uint8_t red;
-	uint8_t green;
-	uint8_t blue;
-
-	uint32_t first_offset;
-	uint16_t width;
-	uint16_t height;
-
-
-	fread(&first_offset, 4, 1, file);
-	fread(&width, 2, 1, file);
-	fread(&height, 2, 1, file);
-
-	std::vector<uint32_t> offsets;
-	offsets.resize(height);
-	offsets[0] = first_offset;
-	fread(&offsets[1], 4, height-1, file);
-
-	fpos_t position;
-	fgetpos(file, &position);
-
-	QImage image(width, height, QImage::Format_ARGB8565_Premultiplied);
-	image.fill(0);
-
-	for(int y = 0; y < height; ++y)
+	DIR * dp = opendir(string.c_str());
+	if(!dp)
 	{
-		fseek(file, offsets[y], SEEK_SET);
-
-		for(int x = 0; x < width; )
-		{
-			uint16_t length;
-			fread(&length, 2, 1, file);
-
-			if(length == 0)
-				break;
-//colored
-			if((length & 0x01) == 0)
-				x += length >> 1;
-			else
-			{
-				length = x + (length >> 1);
-
-				for(; x < length; ++x)
-				{
-					fread(&color, 2, 1, file);
-
-					if(is555)
-					{
-						red = (color & 0x7C00) >> 7;
-						green = (color & 0x03E0) >> 2;
-						blue = (color & 0x001F) << 3;
-					}
-					else
-					{
-						red = (color & 0xF800) >> 8;
-						green = (color & 0x07E0) >> 3;
-						blue = (color & 0x001F) << 3;
-					}
-
-					image.setPixel(x, y, qRgb(red, green, blue));
-				}
-			}
-		}
+		std::cerr << "unable to open directory: " << string << std::endl;
+		std::cerr << "\t" << strerror(errno) << std::endl;
+		return false;
 	}
-
-	fsetpos(file, &position);
-	return image;
-}
-
-image_header writeC16frame(const QImage & frame, FILE * file)
-{
-	uint16_t end_tag = 0;
-	image_header r;
-	r.width = frame.width();
-	r.height = frame.height();
-
-	for(int y = 0; y < frame.height(); ++y)
-	{
-		r.offset.push_back(ftell(file));
-
-		for(int x = 0; x < frame.width(); )
-		{
-			if(!frame.pixel(x, y))
-			{
-				uint16_t length = 0;
-				for(;x < frame.width() && !frame.pixel(x, y); ++x, ++length) ;
-				length = length << 1;
-				fwrite(&length, 2, 1, file);
-			}
-			else
-			{
-				uint16_t length = 0;
-				for(;x+length < frame.width() && frame.pixel(x+length, y); ++length) ;
-				length = length << 1;
-				length |= 1;
-				fwrite(&length, 2, 1, file);
-
-				for(;x < frame.width() && frame.pixel(x, y); ++x)
-				{
-					QRgb color = frame.pixel(x,y);
-
-					uint8_t red = qRed(color);
-					uint8_t green = qGreen(color);
-					uint8_t blue = qBlue(color);
-
-					uint16_t result = ((red & 0xF8) << 8) | ((green & 0xFC) << 3)  | (blue >> 3);
-					fwrite(&result, 2, 1, file);
-				}
-			}
-		}
-
-		fwrite(&end_tag, 2, 1, file);
-	}
-
-	fwrite(&end_tag, 2, 1, file);
-
-	return r;
-}
-
-std::vector<QImage> loadC16File(FILE * file)
-{
-	std::vector<QImage> r;
-
-	uint32_t header;
-	uint16_t frames;
-
-	fread(&header, 4, 1, file);
-	fread(&frames, 2, 1, file);
-
-	for(int i = 0; i < frames; ++i)
-	{
-		r.push_back(readC16frame(file, (header & 0x01) == 0));
-	}
-
-	return r;
-}
-
-void saveC16File(const std::vector<QImage> & frames, FILE * file)
-{
-	uint32_t header = 3;
-	uint16_t length = frames.size();
-
-	fwrite(&header, 4, 1, file);
-	fwrite(&length, 2, 1, file);
-
-	int header_size = 0;
-
-	for(int i = 0; i < length; ++i)
-	{
-		header_size += 4 + frames[i].height()*4;
-	}
-
-	fseek(file, header_size+6, SEEK_SET);
-
-	std::vector<image_header> headers;
-
-	for(int i = 0; i < length; ++i)
-	{
-		headers.push_back(writeC16frame(frames[i], file));
-	}
-
-	fseek(file, 6, SEEK_SET);
-
-	for(int i = 0; i < length; ++i)
-	{
-		fwrite(&(headers[i].offset[0]), 4, 1, file);
-		fwrite(&(headers[i].width), 2, 1, file);
-		fwrite(&(headers[i].height), 2, 1, file);
-		fwrite(&(headers[i].offset[1]), 4, headers[i].offset.size()-1, file);
-	}
-}
-
-bool isBlank(const QImage & image)
-{
-	for(int y = 0; y < image.height(); ++y)
-	{
-		for(int x = 0; x < image.width(); ++x)
-		{
-			if(image.pixel(x, y))
-				return false;
-		}
-	}
+	closedir(dp);
 
 	return true;
 }
 
-void scaleFrames(std::vector<QImage> & frames, float factor)
-{
-	if(factor == 1) return;
-
-	for(uint16_t i = 0; i < frames.size(); ++i)
-	{
-		frames[i] = frames[i].scaled(
-			frames[i].width() * factor,
-			frames[i].height()*factor,
-			Qt::KeepAspectRatio,
-			Qt::SmoothTransformation);
-	}
-}
-
-void mirrorFrames(std::vector<QImage> & frames)
-{
-	for(uint16_t i = 0; (i+8) <= (int)frames.size(); i += 16)
-	{
-		for(int j = 4; j < 8; ++j)
-		{
-			if(isBlank(frames[i+j]))
-				frames[i+j] = frames[(i+j) - 4].mirrored(true, false);
-		}
-	}
-}
-
-
 int main(int argc, char *argv[])
 {
-	float scale = .5;
-	if(argc < 4)	return 0;
+	UNUSED(argc);
+	UNUSED(argv);
 
-	scale = atof(argv[1]);
+	float scale = 1;
+	std::string path;
+	std::string outDir;
+	std::string extension;
 
-	FILE * test_file = fopen(argv[2], "rb");
-	if(!test_file)
+	bool printedSizeTable = false;
+
+#if 1
+	for(;;)
 	{
-		std::cerr << argv[2] << ": " << strerror(errno) << std::endl;
-		return 0;
-	}
-	std::vector<QImage> test = loadC16File(test_file);
-	fclose(test_file);
+		std::cin.clear();
+		std::cout << "enter scaling factor > ";
+		std::cin >> scale;
 
-	test_file = fopen(argv[3], "wb");
-	if(!test_file)
+		if(0 < scale && scale <= 2)
+			break;
+
+		std::cout << "enter a floating point number between (0,2]." << std::endl;
+
+		if(!printedSizeTable)
+		{
+			printedSizeTable = true;
+			std::cout << "Creatures Adventures are about 2x the size of Creature 3 sprites\n" << std::endl;
+
+			std::cout << "life stage size table: \n"
+			"       0      1      2      3      4      5\n"
+			"0  1.000  1.067  1.200  1.400  1.600  1.600\n"
+			"1  0.938  1.000  1.125  1.313  1.500  1.500\n"
+			"2  0.833  0.889  1.000  1.167  1.333  1.333\n"
+			"3  0.714  0.762  0.857  1.000  1.143  1.143\n"
+			"4  0.625  0.667  0.750  0.875  1.000  1.000\n"
+			"5  0.625  0.667  0.750  0.875  1.000  1.000\n" << std::endl;
+		}
+	}
+
+	do {
+		std::cin.clear();
+		std::cout << "enter an input directory > ";
+		std::cin >> path;
+	} while(!isValidDirectory(path));
+
+	do {
+		std::cin.clear();
+		std::cout << "enter an output directory > ";
+		std::cin >> outDir;
+
+		if(path == outDir)
+		{
+			std::cout << "the input directory must be different from the output directory" << std::endl;
+		}
+	} while(!isValidDirectory(outDir));
+
+	do {
+		std::cin.clear();
+		std::cout << "output c16 or s16? ";
+		std::cin >> extension;
+	} while(extension != "s16" && extension != "c16");
+#endif
+
+
+	if(outDir[outDir.size()-1] != SLASH_CHAR)
 	{
-		std::cerr << argv[3] << ": " << strerror(errno) << std::endl;
-		return 0;
+		outDir.push_back(SLASH_CHAR);
 	}
 
-	scaleFrames(test, scale);
-	mirrorFrames(test);
+	for(FileTypesRange<DirectoryRange> directory(path, {"s16", "c16"}); !directory.empty(); directory.popFront())
+	{
+		SpriteFile * sprite = SpriteFile::create(directory.syspath());
 
-	saveC16File(test, test_file);
-	fclose(test_file);
+		if(!sprite)
+		{
+			std::cerr << "failed to open sprite" << std::endl;
+			continue;
+		}
+
+		sprite->scaleFrames(scale);
+		sprite->mirrorFrames();
+
+		sprite->writeFile(outDir + directory.filename() + "." + extension);
+
+		delete sprite;
+	}
+
 	return 0;
 }
